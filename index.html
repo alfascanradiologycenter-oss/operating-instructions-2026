@@ -220,6 +220,26 @@
   }
   footer a{color:var(--navy);}
 
+
+  .folders-intro{color:var(--muted); font-size:13.5px; margin:4px 2px 16px;}
+  .folders-grid{display:grid; grid-template-columns:repeat(auto-fill, minmax(170px,1fr)); gap:14px;}
+  .folder-card{
+    background:var(--card); border:1px solid var(--border); border-radius:10px;
+    padding:22px 14px; text-align:center; cursor:pointer;
+    transition:.15s transform, .15s box-shadow;
+  }
+  .folder-card:hover{transform:translateY(-3px); box-shadow:0 12px 26px rgba(27,58,107,.14);}
+  .folder-icon{font-size:32px; margin-bottom:8px;}
+  .folder-name{font-family:'Cairo',sans-serif; font-weight:800; color:var(--navy); font-size:14.5px; margin-bottom:4px;}
+  .folder-count{color:var(--muted); font-size:12px;}
+  .folder-back{
+    display:inline-block; cursor:pointer; color:var(--navy); font-weight:700;
+    font-family:'Cairo',sans-serif; margin-bottom:16px; font-size:13.5px;
+  }
+  .folder-back:hover{text-decoration:underline;}
+  .folder-heading{font-family:'Cairo',sans-serif; font-weight:800; color:var(--navy); font-size:18px; margin-bottom:18px;}
+  .folder-heading span{color:var(--muted); font-weight:500; font-size:13px;}
+
   @media (max-width:560px){
     header{padding:100px 20px 24px;}
     .logo-badge{left:20px; top:20px; width:64px; height:64px; border-radius:12px;}
@@ -279,6 +299,7 @@ const SHEETS = ["Form Responses 1"];
 
 let allRecords = [];   // { tab, data: {header:value} }
 let companyKeyName = null;
+let currentCategory = null;
 
 const resultsEl = document.getElementById('results');
 const searchInput = document.getElementById('searchInput');
@@ -385,13 +406,44 @@ async function fetchTab(name){
   return records;
 }
 
+
+function parseDateVal(val){
+  const d = new Date(val);
+  return isNaN(d.getTime()) ? 0 : d.getTime();
+}
+
+function dedupeByCompany(records){
+  const map = new Map();
+  records.forEach(r => {
+    const name = normalizeArabic(getCompanyName(r));
+    if(!name) return;
+    const headers = Object.keys(r.data);
+    const dateKey = headers.find(h => /تاريخ/.test(h));
+    const dateVal = dateKey ? r.data[dateKey] : '';
+    const ts = parseDateVal(dateVal);
+    const existing = map.get(name);
+    if(!existing || ts >= existing._ts){
+      r._ts = ts;
+      map.set(name, r);
+    }
+  });
+  return Array.from(map.values());
+}
+
+function getCategory(rec){
+  const keys = Object.keys(rec.data);
+  const key = keys.find(h => /scan\s*segment/i.test(h)) || keys.find(h => /segment/i.test(h));
+  const val = key ? stripInvisible(rec.data[key]) : '';
+  return val || 'غير مصنّف';
+}
+
 async function loadAll(isRefresh){
   syncLabel.textContent = 'جارِ الاتصال بالشيت…';
   liveDot.style.background = '#B8863B';
 
   try{
     const results = await Promise.all(SHEETS.map(fetchTab));
-    allRecords = results.flat();
+    allRecords = dedupeByCompany(results.flat());
 
     // company key is now detected per-record (see getCompanyName), no global assumption needed
 
@@ -404,9 +456,11 @@ async function loadAll(isRefresh){
 
     searchInput.disabled = false;
     if(!isRefresh){
-      renderEmptyPrompt();
+      renderCategoryFolders();
     } else {
-      runSearch();
+      if(searchInput.value.trim()){ runSearch(); }
+      else if(currentCategory){ renderCategoryCompanies(); }
+      else { renderCategoryFolders(); }
     }
   } catch(err){
     console.error(err);
@@ -422,13 +476,55 @@ async function loadAll(isRefresh){
   }
 }
 
-function renderEmptyPrompt(){
+function renderCategoryFolders(){
   metaLine.style.display = 'none';
+  const catMap = {};
+  allRecords.forEach(r => {
+    const cat = getCategory(r);
+    if(!catMap[cat]) catMap[cat] = [];
+    catMap[cat].push(r);
+  });
+  const cats = Object.keys(catMap).sort((a,b) => catMap[b].length - catMap[a].length);
+  const foldersHtml = cats.map(cat => `
+    <div class="folder-card" data-cat="${encodeURIComponent(cat)}">
+      <div class="folder-icon">📁</div>
+      <div class="folder-name">${cat}</div>
+      <div class="folder-count">${catMap[cat].length} شركة</div>
+    </div>`).join('');
+
   resultsEl.innerHTML = `
-    <div class="state-box">
-      <span class="big">ابدأ بكتابة اسم الشركة بالأعلى</span>
-      سيظهر هنا كل عملية تقديم أسعار، طلب، أو موافقة خاصة بالشركة عبر التبويبات
-    </div>`;
+    <div class="folders-intro">تصفّحي الشركات حسب الفئة، أو ابحثي بالاسم في الأعلى</div>
+    <div class="folders-grid">${foldersHtml}</div>`;
+
+  resultsEl.querySelectorAll('.folder-card').forEach(el => {
+    el.addEventListener('click', () => {
+      currentCategory = decodeURIComponent(el.dataset.cat);
+      renderCategoryCompanies();
+    });
+  });
+}
+
+function renderCategoryCompanies(){
+  metaLine.style.display = 'none';
+  const records = allRecords.filter(r => getCategory(r) === currentCategory);
+  const order = [];
+  const groups = {};
+  records.forEach(r => {
+    const name = getCompanyName(r) || '(بدون اسم)';
+    if(!groups[name]){ groups[name] = []; order.push(name); }
+    groups[name].push(r);
+  });
+  const cardsHtml = order.map(name => renderCompanyCard(name, groups[name])).join('');
+
+  resultsEl.innerHTML = `
+    <div class="folder-back" id="folderBack">→ كل الفئات</div>
+    <div class="folder-heading">📁 ${currentCategory} <span>(${order.length} شركة)</span></div>
+    ${cardsHtml}`;
+
+  document.getElementById('folderBack').addEventListener('click', () => {
+    currentCategory = null;
+    renderCategoryFolders();
+  });
 }
 
 function statusIsDone(val){
@@ -436,123 +532,4 @@ function statusIsDone(val){
   return v === 'done' || v.includes('تم');
 }
 
-function formatKV(key, val){
-  if(!val) return '';
-  const isLink = /^https?:\/\//i.test(val);
-  if(isLink){
-    return `<div class="field"><span class="label">${key}</span>
-      <a class="doc-link" href="${val}" target="_blank" rel="noopener">📎 عرض الملف</a></div>`;
-  }
-  return `<div class="field"><span class="label">${key}</span><span class="value">${val}</span></div>`;
-}
-
-function renderCompanyCard(companyName, entries){
-  const entriesHtml = entries.map(e => {
-    const headers = Object.keys(e.data);
-    const dateKey  = headers.find(h => /تاريخ/.test(h));
-    const fileKey  = headers.find(h => /ملف/.test(h));
-    const aeKey    = headers.find(h => /account/i.test(h));
-    const phoneKey = headers.find(h => /phone/i.test(h));
-    const emailKey = headers.find(h => /email/i.test(h));
-    const flmKey   = headers.find(h => h.trim().toUpperCase() === 'FLM');
-    const rmKey    = headers.find(h => h.trim().toUpperCase() === 'RM');
-
-    const dateVal = dateKey ? e.data[dateKey] : '';
-    const fileVal = fileKey ? e.data[fileKey] : '';
-
-    return `
-      <div class="entry">
-        <div class="entry-top">
-          ${dateVal ? `<div class="field"><span class="label">تاريخ التحديث</span><span class="value">${dateVal}</span></div>` : ''}
-        </div>
-        ${fileVal ? `<div class="file-row"><a class="doc-link" href="${fileVal}" target="_blank" rel="noopener">📎 عرض الملف</a></div>` : ''}
-        <div class="field-grid">
-          ${formatKV(aeKey, e.data[aeKey])}
-          ${formatKV(phoneKey, e.data[phoneKey])}
-          ${formatKV(emailKey, e.data[emailKey])}
-        </div>
-        <div class="field-grid">
-          ${formatKV(flmKey, e.data[flmKey])}
-          ${formatKV(rmKey, e.data[rmKey])}
-        </div>
-      </div>`;
-  }).join('');
-
-  return `
-    <div class="company-card">
-      <div class="company-head">
-        <div class="company-title">${companyName}</div>
-      </div>
-      ${entriesHtml}
-    </div>`;
-}
-
-function runSearch(){
-  const raw = searchInput.value;
-  clearBtn.style.display = raw ? 'block' : 'none';
-  const q = normalizeArabic(raw);
-
-  let pool = allRecords;
-
-  if(!q){
-    metaLine.style.display = 'none';
-    renderEmptyPrompt();
-    return;
-  }
-
-  const matches = pool.filter(r => {
-    const name = getCompanyName(r);
-    return q ? normalizeArabic(name).includes(q) : true;
-  });
-
-  if(q && matches.length === 0){
-    metaLine.style.display = 'flex';
-    metaQuery.textContent = raw;
-    metaCount.textContent = '0';
-    resultsEl.innerHTML = `
-      <div class="state-box">
-        <span class="big">لا توجد نتائج</span>
-        لم يتم العثور على شركة تحتوي على «${raw}». جرّب جزءًا أقصر من الاسم.
-      </div>`;
-    return;
-  }
-
-  // group by company name
-  const groups = {};
-  const order = [];
-  matches.forEach(r => {
-    const name = getCompanyName(r) || '(بدون اسم)';
-    if(!groups[name]){ groups[name] = []; order.push(name); }
-    groups[name].push(r);
-  });
-
-  if(q){
-    metaLine.style.display = 'flex';
-    metaQuery.textContent = raw;
-    metaCount.textContent = order.length;
-  } else {
-    metaLine.style.display = 'none';
-  }
-
-  resultsEl.innerHTML = order.map(name => renderCompanyCard(name, groups[name])).join('');
-}
-
-let debounceTimer;
-searchInput.addEventListener('input', () => {
-  clearTimeout(debounceTimer);
-  debounceTimer = setTimeout(runSearch, 150);
-});
-clearBtn.addEventListener('click', () => {
-  searchInput.value = '';
-  runSearch();
-  searchInput.focus();
-});
-
-loadAll(false);
-
-// Auto-refresh from the sheet every 60 seconds, in the background —
-// no manual reload needed. The current search query is preserved.
-setInterval(() => { loadAll(true); }, 60000);
-</script>
-</body>
-</html>
+function formatKV(key, val)
