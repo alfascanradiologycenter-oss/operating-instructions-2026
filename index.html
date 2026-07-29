@@ -294,7 +294,7 @@
 </div>
 
 <script>
-const SPREADSHEET_ID = "1pgtaGsJ-et6OCnLfAGLNLw8tZDZcg9E1YodF63ohna8";
+const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzUbeNie-i7D2V74Dj_KE9L1AnEEvmQfDmfMoCdmuwERz6BaFXWQ19Z8BwA4doZ7n5b/exec";
 const SHEETS = ["Form Responses 1"];
 
 let allRecords = [];   // { tab, data: {header:value} }
@@ -339,11 +339,27 @@ function findStatusKey(headers){
   return headers.find(h => /status|حال/i.test(h));
 }
 
-// JSONP loader: bypasses browser CORS restrictions entirely, since <script>
-// tags are not subject to CORS the way fetch()/XHR are.
-function fetchTabJSONP(name){
+// Fast path: plain fetch() to our own Apps Script endpoint (no Visualization
+// API overhead). Falls back to JSONP only if fetch is blocked for some reason.
+async function fetchTabViaFetch(name){
+  const url = `${SCRIPT_URL}?sheet=${encodeURIComponent(name)}&t=${Date.now()}`;
+  const res = await fetch(url);
+  if(!res.ok) throw new Error('HTTP ' + res.status);
+  const json = await res.json();
+  if(json.status !== 'ok') throw new Error(json.message || 'Unknown error');
+  return (json.rows || []).map(row => {
+    const data = {};
+    Object.keys(row).forEach(h => {
+      const key = stripInvisible(h);
+      if(key) data[key] = stripInvisible(String(row[h] ?? ''));
+    });
+    return { tab: name, data };
+  }).filter(r => Object.values(r.data).some(v => v));
+}
+
+function fetchTabViaJSONP(name){
   return new Promise((resolve, reject) => {
-    const cbName = 'gvizCB_' + Math.random().toString(36).slice(2);
+    const cbName = 'apiCB_' + Math.random().toString(36).slice(2);
     let settled = false;
 
     const timeoutId = setTimeout(() => {
@@ -363,47 +379,40 @@ function fetchTabJSONP(name){
       if(settled) return;
       settled = true;
       cleanup();
-      resolve(json);
+      if(json.status !== 'ok'){
+        reject(new Error(json.message || `تبويب "${name}" غير موجود`));
+        return;
+      }
+      const records = (json.rows || []).map(row => {
+        const data = {};
+        Object.keys(row).forEach(h => {
+          const key = stripInvisible(h);
+          if(key) data[key] = stripInvisible(String(row[h] ?? ''));
+        });
+        return { tab: name, data };
+      }).filter(r => Object.values(r.data).some(v => v));
+      resolve(records);
     };
 
     const script = document.createElement('script');
-    script.src = `https://docs.google.com/spreadsheets/d/${SPREADSHEET_ID}/gviz/tq?tqx=out:json;responseHandler:${cbName}&sheet=${encodeURIComponent(name)}`;
+    script.src = `${SCRIPT_URL}?sheet=${encodeURIComponent(name)}&callback=${cbName}`;
     script.onerror = () => {
       if(settled) return;
       settled = true;
       cleanup();
-      reject(new Error(`تعذّر تحميل تبويب "${name}" — تأكّدي أن اسم التبويب مطابق حرفيًا في الشيت وأن المشاركة "Anyone with the link – Viewer".`));
+      reject(new Error(`تعذّر تحميل تبويب "${name}".`));
     };
     document.body.appendChild(script);
   });
 }
 
 async function fetchTab(name){
-  const json = await fetchTabJSONP(name);
-  if(!json || json.status === 'error'){
-    const msg = (json && json.errors && json.errors[0] && (json.errors[0].detailed_message || json.errors[0].message)) || '';
-    throw new Error(`تبويب "${name}" مش موجود بنفس الاسم ده في الشيت. ${msg}`);
+  try{
+    return await fetchTabViaFetch(name);
+  } catch(err){
+    console.warn('fetch() failed, falling back to JSONP:', err);
+    return await fetchTabViaJSONP(name);
   }
-  const table = json.table;
-  if(!table || !table.cols) return [];
-  const headers = table.cols.map(c => stripInvisible(c.label || ''));
-  const records = [];
-  (table.rows || []).forEach(row => {
-    const data = {};
-    let hasContent = false;
-    (row.c || []).forEach((cell, idx) => {
-      let val = '';
-      if(cell && cell.v !== null && cell.v !== undefined){
-        const raw = (cell.f !== undefined && cell.f !== null) ? cell.f : cell.v;
-        val = stripInvisible(String(raw));
-      }
-      const h = headers[idx];
-      if(h) data[h] = val;
-      if(val) hasContent = true;
-    });
-    if(hasContent) records.push({ tab: name, data });
-  });
-  return records;
 }
 
 
@@ -437,6 +446,22 @@ function getCategory(rec){
   return val || 'غير مصنّف';
 }
 
+const CACHE_KEY = 'opsDashboardCache_v1';
+
+function loadFromCache(){
+  try{
+    const raw = localStorage.getItem(CACHE_KEY);
+    if(!raw) return null;
+    return JSON.parse(raw);
+  } catch(e){ return null; }
+}
+
+function saveToCache(records){
+  try{
+    localStorage.setItem(CACHE_KEY, JSON.stringify({ records, ts: Date.now() }));
+  } catch(e){ /* storage full or unavailable — ignore, not critical */ }
+}
+
 async function loadAll(isRefresh){
   syncLabel.textContent = 'جارِ الاتصال بالشيت…';
   liveDot.style.background = '#B8863B';
@@ -444,6 +469,7 @@ async function loadAll(isRefresh){
   try{
     const results = await Promise.all(SHEETS.map(fetchTab));
     allRecords = dedupeByCompany(results.flat());
+    saveToCache(allRecords);
 
     // company key is now detected per-record (see getCompanyName), no global assumption needed
 
@@ -532,4 +558,139 @@ function statusIsDone(val){
   return v === 'done' || v.includes('تم');
 }
 
-function formatKV(key, val)
+function formatKV(key, val){
+  if(!val) return '';
+  const isLink = /^https?:\/\//i.test(val);
+  if(isLink){
+    return `<div class="field"><span class="label">${key}</span>
+      <a class="doc-link" href="${val}" target="_blank" rel="noopener">📎 عرض الملف</a></div>`;
+  }
+  return `<div class="field"><span class="label">${key}</span><span class="value">${val}</span></div>`;
+}
+
+function renderCompanyCard(companyName, entries){
+  const entriesHtml = entries.map(e => {
+    const headers = Object.keys(e.data);
+    const dateKey  = headers.find(h => /تاريخ/.test(h));
+    const fileKey  = headers.find(h => /ملف/.test(h));
+    const aeKey    = headers.find(h => /account/i.test(h));
+    const phoneKey = headers.find(h => /phone/i.test(h));
+    const emailKey = headers.find(h => /email/i.test(h));
+    const flmKey   = headers.find(h => h.trim().toUpperCase() === 'FLM');
+    const rmKey    = headers.find(h => h.trim().toUpperCase() === 'RM');
+
+    const dateVal = dateKey ? e.data[dateKey] : '';
+    const fileVal = fileKey ? e.data[fileKey] : '';
+
+    return `
+      <div class="entry">
+        <div class="entry-top">
+          ${dateVal ? `<div class="field"><span class="label">تاريخ التحديث</span><span class="value">${dateVal}</span></div>` : ''}
+        </div>
+        ${fileVal ? `<div class="file-row"><a class="doc-link" href="${fileVal}" target="_blank" rel="noopener">📎 عرض الملف</a></div>` : ''}
+        <div class="field-grid">
+          ${formatKV(aeKey, e.data[aeKey])}
+          ${formatKV(phoneKey, e.data[phoneKey])}
+          ${formatKV(emailKey, e.data[emailKey])}
+        </div>
+        <div class="field-grid">
+          ${formatKV(flmKey, e.data[flmKey])}
+          ${formatKV(rmKey, e.data[rmKey])}
+        </div>
+      </div>`;
+  }).join('');
+
+  return `
+    <div class="company-card">
+      <div class="company-head">
+        <div class="company-title">${companyName}</div>
+      </div>
+      ${entriesHtml}
+    </div>`;
+}
+
+function runSearch(){
+  const raw = searchInput.value;
+  clearBtn.style.display = raw ? 'block' : 'none';
+  const q = normalizeArabic(raw);
+
+  let pool = allRecords;
+
+  if(!q){
+    metaLine.style.display = 'none';
+    if(currentCategory){
+      renderCategoryCompanies();
+    } else {
+      renderCategoryFolders();
+    }
+    return;
+  }
+
+  const matches = pool.filter(r => {
+    const name = getCompanyName(r);
+    return q ? normalizeArabic(name).includes(q) : true;
+  });
+
+  if(q && matches.length === 0){
+    metaLine.style.display = 'flex';
+    metaQuery.textContent = raw;
+    metaCount.textContent = '0';
+    resultsEl.innerHTML = `
+      <div class="state-box">
+        <span class="big">لا توجد نتائج</span>
+        لم يتم العثور على شركة تحتوي على «${raw}». جرّب جزءًا أقصر من الاسم.
+      </div>`;
+    return;
+  }
+
+  // group by company name
+  const groups = {};
+  const order = [];
+  matches.forEach(r => {
+    const name = getCompanyName(r) || '(بدون اسم)';
+    if(!groups[name]){ groups[name] = []; order.push(name); }
+    groups[name].push(r);
+  });
+
+  if(q){
+    metaLine.style.display = 'flex';
+    metaQuery.textContent = raw;
+    metaCount.textContent = order.length;
+  } else {
+    metaLine.style.display = 'none';
+  }
+
+  resultsEl.innerHTML = order.map(name => renderCompanyCard(name, groups[name])).join('');
+}
+
+let debounceTimer;
+searchInput.addEventListener('input', () => {
+  clearTimeout(debounceTimer);
+  debounceTimer = setTimeout(runSearch, 150);
+});
+clearBtn.addEventListener('click', () => {
+  searchInput.value = '';
+  runSearch();
+  searchInput.focus();
+});
+
+const cached = loadFromCache();
+if(cached && cached.records && cached.records.length){
+  allRecords = cached.records;
+  searchInput.disabled = false;
+  countLabel.textContent = allRecords.length + ' شركة مسجّلة';
+  const cachedDate = new Date(cached.ts);
+  lastUpdated.textContent = cachedDate.toLocaleString('ar-EG', { hour12: true }) + ' (نسخة محفوظة)';
+  lastUpdatedTop.textContent = cachedDate.toLocaleString('ar-EG', { hour12: true });
+  if(currentCategory){ renderCategoryCompanies(); } else { renderCategoryFolders(); }
+  loadAll(true); // refresh silently in the background with the latest sheet data
+} else {
+  loadAll(false);
+}
+
+// Auto-refresh from the sheet every 60 seconds, in the background —
+// no manual reload needed. The current search query is preserved.
+setInterval(() => { loadAll(true); }, 60000);
+</script>
+</body>
+</html>
