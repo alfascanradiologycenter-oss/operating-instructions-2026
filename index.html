@@ -240,6 +240,18 @@
   .folder-heading{font-family:'Cairo',sans-serif; font-weight:800; color:var(--navy); font-size:18px; margin-bottom:18px;}
   .folder-heading span{color:var(--muted); font-weight:500; font-size:13px;}
 
+  .notif-wrap{max-width:980px; margin:18px auto 0; padding:0 20px; display:flex; flex-direction:column; gap:10px;}
+  .notif-card{
+    display:flex; align-items:flex-start; gap:12px;
+    background:#FFF8E8; border:1px solid #F0DBA0; border-right:4px solid #C89B3C;
+    border-radius:8px; padding:14px 16px;
+    box-shadow:0 4px 14px rgba(200,155,60,.10);
+  }
+  .notif-card .notif-icon{font-size:18px; line-height:1; margin-top:1px;}
+  .notif-card .notif-body{flex:1;}
+  .notif-card .notif-text{font-size:13.5px; color:#4A3B15; font-weight:600; line-height:1.7;}
+  .notif-card .notif-date{font-size:11.5px; color:#9C8543; font-family:'Cairo',sans-serif; font-weight:700; margin-top:4px;}
+
   @media (max-width:560px){
     header{padding:100px 20px 24px;}
     .logo-badge{left:20px; top:20px; width:64px; height:64px; border-radius:12px;}
@@ -305,6 +317,8 @@
     </div>
   </header>
 
+  <div class="notif-wrap" id="notifWrap"></div>
+
   <div class="search-panel">
     <div class="search-box">
       <input id="searchInput" type="text" placeholder="اكتب اسم الشركة… مثال: اكسا ايجيبت" autocomplete="off" disabled>
@@ -335,6 +349,8 @@
 <script>
 const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbzUbeNie-i7D2V74Dj_KE9L1AnEEvmQfDmfMoCdmuwERz6BaFXWQ19Z8BwA4doZ7n5b/exec";
 const SHEETS = ["Form Responses 1"];
+const NOTIF_SHEET = "Important Notification";
+let notifications = [];
 
 let allRecords = [];   // { tab, data: {header:value} }
 let companyKeyName = null;
@@ -499,10 +515,31 @@ function loadFromCache(){
   } catch(e){ return null; }
 }
 
-function saveToCache(records){
+function saveToCache(records, notifs){
   try{
-    localStorage.setItem(CACHE_KEY, JSON.stringify({ records, ts: Date.now() }));
+    localStorage.setItem(CACHE_KEY, JSON.stringify({ records, notifs: notifs || [], ts: Date.now() }));
   } catch(e){ /* storage full or unavailable — ignore, not critical */ }
+}
+
+function renderNotifications(){
+  const wrap = document.getElementById('notifWrap');
+  if(!notifications.length){ wrap.innerHTML = ''; return; }
+  wrap.innerHTML = notifications.map(n => {
+    const headers = Object.keys(n.data);
+    const dateKey = headers.find(h => /date|تاريخ/i.test(h));
+    const textKey = headers.find(h => /notification|إشعار|اشعار/i.test(h)) || headers.find(h => h !== dateKey);
+    const dateVal = dateKey ? n.data[dateKey] : '';
+    const textVal = textKey ? n.data[textKey] : '';
+    if(!textVal) return '';
+    return `
+      <div class="notif-card">
+        <span class="notif-icon">🔔</span>
+        <div class="notif-body">
+          <div class="notif-text">${textVal}</div>
+          ${dateVal ? `<div class="notif-date">${dateVal}</div>` : ''}
+        </div>
+      </div>`;
+  }).join('');
 }
 
 async function loadAll(isRefresh){
@@ -510,9 +547,14 @@ async function loadAll(isRefresh){
   liveDot.style.background = '#B8863B';
 
   try{
-    const results = await Promise.all(SHEETS.map(fetchTab));
+    const [results, notifResult] = await Promise.all([
+      Promise.all(SHEETS.map(fetchTab)),
+      fetchTab(NOTIF_SHEET).catch(err => { console.warn('Notifications fetch failed:', err); return []; })
+    ]);
     allRecords = dedupeByCompany(results.flat());
-    saveToCache(allRecords);
+    notifications = notifResult;
+    renderNotifications();
+    saveToCache(allRecords, notifications);
 
     // company key is now detected per-record (see getCompanyName), no global assumption needed
 
@@ -721,6 +763,8 @@ function startDashboard(){
   const cached = loadFromCache();
   if(cached && cached.records && cached.records.length){
     allRecords = cached.records;
+    notifications = cached.notifs || [];
+    renderNotifications();
     searchInput.disabled = false;
     countLabel.textContent = allRecords.length + ' شركة مسجّلة';
     const cachedDate = new Date(cached.ts);
