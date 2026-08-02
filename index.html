@@ -521,6 +521,18 @@ function saveToCache(records, notifs){
   } catch(e){ /* storage full or unavailable — ignore, not critical */ }
 }
 
+function formatNotifDate(val){
+  if(!val) return '';
+  const isoMatch = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(val);
+  if(isoMatch){
+    const d = new Date(val);
+    if(!isNaN(d.getTime())){
+      return d.toLocaleDateString('ar-EG', { year: 'numeric', month: 'short', day: 'numeric' });
+    }
+  }
+  return val;
+}
+
 function renderNotifications(){
   const wrap = document.getElementById('notifWrap');
   if(!notifications.length){ wrap.innerHTML = ''; return; }
@@ -528,7 +540,7 @@ function renderNotifications(){
     const headers = Object.keys(n.data);
     const dateKey = headers.find(h => /date|تاريخ/i.test(h));
     const textKey = headers.find(h => /notification|إشعار|اشعار/i.test(h)) || headers.find(h => h !== dateKey);
-    const dateVal = dateKey ? n.data[dateKey] : '';
+    const dateVal = dateKey ? formatNotifDate(n.data[dateKey]) : '';
     const textVal = textKey ? n.data[textKey] : '';
     if(!textVal) return '';
     return `
